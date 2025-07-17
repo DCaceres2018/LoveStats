@@ -2,9 +2,13 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hive/hive.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
+  Hive.registerAdapter(EncuentroAdapter());
   runApp(IntimiTrackApp());
 }
 
@@ -247,34 +251,32 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    _cargarEncuentros();
+    _cargarEncuentros().then((lista) {
+      setState(() {
+        encuentros = lista;
+      });
+    });
     cargarPreferenciasCampos().then((_) {
-      setState(() {}); // Para refrescar la UI si cambia algo
+      setState(() {});
     });
   }
 
-  Future<void> _guardarEncuentros() async {
-    final prefs = await SharedPreferences.getInstance();
-    final lista = encuentros.map((e) => e.toJson()).toList();
-    prefs.setString('encuentros', jsonEncode(lista));
+  Future<void> _guardarEncuentros(List<Encuentro> encuentros) async {
+    final box = await Hive.openBox<Encuentro>('encuentros');
+    await box.clear();
+    await box.addAll(encuentros);
   }
 
-  Future<void> _cargarEncuentros() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = prefs.getString('encuentros');
-    if (data != null) {
-      final lista = jsonDecode(data) as List;
-      setState(() {
-        encuentros = lista.map((e) => Encuentro.fromJson(e)).toList();
-      });
-    }
+  Future<List<Encuentro>> _cargarEncuentros() async {
+    final box = await Hive.openBox<Encuentro>('encuentros');
+    return box.values.toList();
   }
 
-  void _agregarEncuentro(Encuentro nuevo) {
+  void _agregarEncuentro(Encuentro nuevo) async {
     setState(() {
       encuentros.add(nuevo);
     });
-    _guardarEncuentros();
+    await _guardarEncuentros(encuentros);
   }
 
   int _calcularStreak() {
@@ -842,45 +844,87 @@ class HistoricoEncuentros extends StatelessWidget {
     return SafeArea(
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        child: DataTable(
-          columns: [
-            if (campos.fecha) DataColumn(label: Text('Fecha')),
-            if (campos.lugar) DataColumn(label: Text('Lugar')),
-            if (campos.tipo) DataColumn(label: Text('Tipo')),
-            if (campos.duracion) DataColumn(label: Text('Duración')),
-            if (campos.satisfaccion) DataColumn(label: Text('Satisfacción')),
-            if (campos.notas) DataColumn(label: Text('Notas')),
-          ],
-          rows: encuentros.map((e) {
-            return DataRow(cells: [
-              if (campos.fecha)
-                DataCell(Text(DateFormat('dd/MM/yyyy').format(e.fecha))),
-              if (campos.lugar) DataCell(Text(e.lugar)),
-              if (campos.tipo) DataCell(Text(e.tipo)),
-              if (campos.duracion)
-                DataCell(Text('${e.duracion.inMinutes} min')),
-              if (campos.satisfaccion)
-                DataCell(Text(e.satisfaccion.toString())),
-              if (campos.notas) DataCell(Text(e.notas)),
-            ]);
-          }).toList(),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minWidth: MediaQuery.of(context).size.width,
+          ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.vertical,
+            child: DataTable(
+              columns: [
+                if (campos.fecha) DataColumn(label: Text('Fecha')),
+                if (campos.lugar) DataColumn(label: Text('Lugar')),
+                if (campos.tipo) DataColumn(label: Text('Tipo')),
+                if (campos.duracion) DataColumn(label: Text('Duración')),
+                if (campos.satisfaccion)
+                  DataColumn(label: Text('Satisfacción')),
+                if (campos.notas) DataColumn(label: Text('Notas')),
+              ],
+              rows: encuentros.map((e) {
+                return DataRow(cells: [
+                  if (campos.fecha)
+                    DataCell(Text(DateFormat('dd/MM/yyyy').format(e.fecha))),
+                  if (campos.lugar) DataCell(Text(e.lugar)),
+                  if (campos.tipo) DataCell(Text(e.tipo)),
+                  if (campos.duracion)
+                    DataCell(Text(
+                      (e.duracion != null && e.duracion.inMinutes >= 0)
+                          ? '${e.duracion.inMinutes} min'
+                          : '-',
+                    )),
+                  if (campos.satisfaccion)
+                    DataCell(Text(e.satisfaccion.toString())),
+                  if (campos.notas) DataCell(Text(e.notas)),
+                ]);
+              }).toList(),
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
+// --- HIVE ADAPTER PARA ENCUENTRO ---
+class EncuentroAdapter extends TypeAdapter<Encuentro> {
+  @override
+  final int typeId = 0;
+
+  @override
+  Encuentro read(BinaryReader reader) {
+    return Encuentro(
+      fecha: DateTime.parse(reader.readString()),
+      tipo: reader.readString(),
+      lugar: reader.readString(),
+      duracion: Duration(minutes: reader.readInt()),
+      satisfaccion: reader.readInt(),
+      notas: reader.readString(),
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, Encuentro obj) {
+    writer.writeString(obj.fecha.toIso8601String());
+    writer.writeString(obj.tipo);
+    writer.writeString(obj.lugar);
+    writer.writeInt(obj.duracion.inMinutes);
+    writer.writeInt(obj.satisfaccion);
+    writer.writeString(obj.notas);
+  }
+}
+
+// --- CAMPOS Y FUNCIONES DE PREFERENCIAS CON HIVE ---
 CamposFormulario camposActivos = CamposFormulario();
 
 Future<void> guardarPreferenciasCampos() async {
-  final prefs = await SharedPreferences.getInstance();
-  prefs.setString('camposActivos', jsonEncode(camposActivos.toJson()));
+  final box = await Hive.openBox('preferencias');
+  await box.put('camposActivos', camposActivos.toJson());
 }
 
 Future<void> cargarPreferenciasCampos() async {
-  final prefs = await SharedPreferences.getInstance();
-  final data = prefs.getString('camposActivos');
+  final box = await Hive.openBox('preferencias');
+  final data = box.get('camposActivos');
   if (data != null) {
-    camposActivos = CamposFormulario.fromJson(jsonDecode(data));
+    camposActivos = CamposFormulario.fromJson(Map<String, dynamic>.from(data));
   }
 }
